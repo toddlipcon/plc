@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%%% File    : parallel_lc.erl
+%%% File    : plc.erl
 %%% Author  : Todd Lipcon <todd@amiestreet.com>
 %%% Description : This parse transform allows list comprehensions to be
 %%% performed in parallel using the plists module. To use it, simply
@@ -13,7 +13,7 @@
 %%%
 %%% Created : 17 Jun 2008 by Todd Lipcon <todd@lipcon.org>
 %%%-------------------------------------------------------------------
--module(parallel_lc).
+-module(plc).
 
 
 -export([parse_transform/2]).
@@ -449,7 +449,7 @@ expr({call,_Line,
     
     GennedList = {call, LcLine,
                   {remote, LcLine,
-                   {atom, LcLine, parallel_lc},
+                   {atom, LcLine, plc},
                    {atom, LcLine, cartesian_product}},
                   [GennedListsForms]},
 

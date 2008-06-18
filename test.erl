@@ -1,6 +1,6 @@
 -module(test).
 
--compile({parse_transform, parallel_lc}).
+-compile({parse_transform, plc}).
 
 -compile(export_all).
 
