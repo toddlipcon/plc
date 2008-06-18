@@ -1,30 +1,23 @@
-%% ``The contents of this file are subject to the Erlang Public License,
-%% Version 1.1, (the "License"); you may not use this file except in
-%% compliance with the License. You should have received a copy of the
-%% Erlang Public License along with this software. If not, it can be
-%% retrieved via the world wide web at http://www.erlang.org/.
-%% 
-%% Software distributed under the License is distributed on an "AS IS"
-%% basis, WITHOUT WARRANTY OF ANY KIND, either express or implied. See
-%% the License for the specific language governing rights and limitations
-%% under the License.
-%% 
-%% The Initial Developer of the Original Code is Ericsson Utvecklings AB.
-%% Portions created by Ericsson are Copyright 1999, Ericsson Utvecklings
-%% AB. All Rights Reserved.''
-%% 
-%%     $Id$
-%%
+%%%-------------------------------------------------------------------
+%%% File    : parallel_lc.erl
+%%% Author  : Todd Lipcon <todd@amiestreet.com>
+%%% Description : This parse transform allows list comprehensions to be
+%%% performed in parallel using the plists module. To use it, simply
+%%% add plc:lc(...) around the list comprehension.
+%%%
+%%% Note that this is not as efficient as it could be, and there
+%%% are no guarantees that it works.
+%%%
+%%% Item generation and filtering happens on the spawning node and is
+%%% not distributed.
+%%%
+%%% Created : 17 Jun 2008 by Todd Lipcon <todd@lipcon.org>
+%%%-------------------------------------------------------------------
 -module(parallel_lc).
 
-%% A identity transformer of Erlang abstract syntax.
-
-%% This module only traverses legal Erlang code. This is most noticeable
-%% in guards where only a limited number of expressions are allowed.
-%% N.B. if this module is to be used as a basis for tranforms then
-%% all the error cases must be handled otherwise this module just crashes!
 
 -export([parse_transform/2]).
+-export([cartesian_product/1]).
 
 parse_transform(Forms, _Options) ->
     io:format("~p~n", [Forms]),
@@ -429,47 +422,74 @@ expr({'fun',Line,Body}) ->
 
 %% [exp(...)  || GenDest <- GenSrc] to
 %% map(fun(GenDest) -> exp(...) end, GenSrc)
-
+%%
 expr({call,_Line,
       {remote, _ ,{atom, _, plc},{atom, _, lc}},
       [{lc, LcLine,
         LcExp,
         Quals}]}) ->
 
-    [Generator] =
+    Generators =
         [Gen || Gen = {generate, _GenLine, _GenDest, _GenSrc} <- Quals],
 
 
+    GennedLists =
+        [gen_filtered_list(GenLine, Generator) ||
+            Generator = {generate, GenLine, GenDest, GenSrc} <- Generators],
+
+    io:format("GennedLists: ~p~n", [GennedLists]),
+    GennedListsForms =
+        lists:foldl(
+          fun(GennedList, AccIn) ->
+                  {cons, LcLine, GennedList, AccIn}
+          end,
+          {nil, LcLine},
+          GennedLists),
+    io:format("GennedListsForms: ~p~n", [GennedListsForms]),
+    
+    GennedList = {call, LcLine,
+                  {remote, LcLine,
+                   {atom, LcLine, parallel_lc},
+                   {atom, LcLine, cartesian_product}},
+                  [GennedListsForms]},
+
     FilterQuals =
         [Qual || Qual <- Quals, element(1, Qual) =/= generate],
-
     FilterQualOps = filter_qual_ops(LcLine, FilterQuals),
 
-    {generate, GenLine, GenDest, GenSrc} = Generator,
 
-    GenerateMatchingFilterFun =
-        {'fun', GenLine,
-         {clauses, [{clause, GenLine, [GenDest], [],
-                     [FilterQualOps]},
-                    {clause, GenLine, [{atom, LcLine, '_'}], [],
-                     [{atom, GenLine, false}]}]}},
+    [FirstGenDest | RestGenDests] =
+        [Dest || {generate, _, Dest, _} <- Generators],
+
+    FilterFunArg = lists:foldl(
+                     fun(Dest, AccIn) ->
+                             {tuple, LcLine, [Dest, AccIn]}
+                     end,
+                     FirstGenDest,
+                     RestGenDests),
+
+    io:format("FilterFunArg: ~p~n", [FilterFunArg]),
+
+    QualFilterFun =
+        {'fun', LcLine,
+         {clauses, [{clause, LcLine, [FilterFunArg], [],
+                     [FilterQualOps]}]}},
+    FilteredList = {call, LcLine,
+                    {remote, LcLine,
+                     {atom, LcLine, lists},
+                     {atom, LcLine, filter}},
+                    [QualFilterFun, GennedList]},
 
     MapFunc =
         {'fun', LcLine,
-         {clauses, [{clause, LcLine, [GenDest], [],
+         {clauses, [{clause, LcLine, [FilterFunArg], [],
                      [LcExp]}]}},
-
-    ListToPmap = {call, LcLine,
-                  {remote, LcLine,
-                   {atom, LcLine, lists},
-                   {atom, LcLine, filter}},
-                  [GenerateMatchingFilterFun, GenSrc]},
 
     expr({call, LcLine,
           {remote, LcLine,
            {atom, LcLine, plists},
            {atom, LcLine, map}},
-          [MapFunc, ListToPmap]});
+          [MapFunc, FilteredList]});
 
 %    expr({lc, LcLine, LcExp, Quals});
 
@@ -576,3 +596,30 @@ filter_qual_ops(_Line, [Op]) ->
     Op;
 filter_qual_ops(Line, [Op | Rest]) ->
     {op, Line, 'andalso', Op, filter_qual_ops(Line, Rest)}.
+
+
+gen_filtered_list(LcLine, Generator) ->
+    {generate, GenLine, GenDest, GenSrc} = Generator,
+
+    MatchGeneratorPredFun =
+        {'fun', GenLine,
+         {clauses, [{clause, GenLine, [GenDest], [],
+                     [{atom, GenLine, true}]},
+                    {clause, GenLine, [{atom, GenLine, '_'}], [],
+                     [{atom, GenLine, false}]}]}},
+
+
+    ListToPmap = {call, LcLine,
+                  {remote, LcLine,
+                   {atom, LcLine, lists},
+                   {atom, LcLine, filter}},
+                  [MatchGeneratorPredFun, GenSrc]},
+    ListToPmap.
+
+
+cartesian_product([ListA]) when is_list(ListA) ->
+    ListA;
+cartesian_product([ListA | RestLists]) ->
+    [{AElem, BElem} ||
+        AElem <- ListA,
+        BElem <- cartesian_product(RestLists)].
